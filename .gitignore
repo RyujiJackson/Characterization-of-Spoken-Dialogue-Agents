@@ -423,3 +423,6 @@ model/
 
 cache/
 >>>>>>> 0fcd6e9 (Age and gender prediction code finished)
+
+model_assets/jvnv-F1-jp/
+.cache/
