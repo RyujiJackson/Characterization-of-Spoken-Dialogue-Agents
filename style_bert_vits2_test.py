@@ -40,7 +40,7 @@ model = TTSModel(
 )
 
 # 4) Run inference
-text = "これはスタイル・バート・ビッツツーのテスト音声です。"
+text = "ひつまぶし名古屋の名物だよね"
 sr, audio = model.infer(
     text=text,
     language=Languages.JP,
