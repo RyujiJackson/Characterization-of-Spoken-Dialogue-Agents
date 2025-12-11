@@ -5,8 +5,8 @@ import queue
 import sys
 import tempfile
 import time
+import threading
 from typing import Optional
-
 import numpy as np
 import sounddevice as sd
 from scipy.io.wavfile import write as wav_write
@@ -22,56 +22,103 @@ _kotoba_asr = None
 _k2_model = None
 
 
+# ========= SPINNER CLASS =========
+class Spinner:
+    """A simple spinner to show processing is happening."""
+    
+    FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
+    
+    def __init__(self, message: str = "Processing"):
+        self.message = message
+        self._stop_event = threading.Event()
+        self._thread: Optional[threading.Thread] = None
+        self._start_time = 0.0
+    
+    def _spin(self):
+        idx = 0
+        while not self._stop_event.is_set():
+            elapsed = time.perf_counter() - self._start_time
+            frame = self.FRAMES[idx % len(self.FRAMES)]
+            sys.stderr.write(f"\r{frame} {self.message}... ({elapsed:.1f}s) ")
+            sys.stderr.flush()
+            idx += 1
+            self._stop_event.wait(0.1)
+        # Clear the line
+        sys.stderr.write("\r" + " " * 60 + "\r")
+        sys.stderr.flush()
+    
+    def start(self):
+        self._start_time = time.perf_counter()
+        self._stop_event.clear()
+        self._thread = threading.Thread(target=self._spin, daemon=True)
+        self._thread.start()
+    
+    def stop(self):
+        self._stop_event.set()
+        if self._thread:
+            self._thread.join(timeout=1)
+    
+    def __enter__(self):
+        self.start()
+        return self
+    
+    def __exit__(self, *args):
+        self.stop()
+
+
 def _load_kotoba_asr():
     """Load / cache the Kotoba Whisper HF pipeline."""
     global _kotoba_asr
     if _kotoba_asr is not None:
         return _kotoba_asr
 
-    try:
-        from transformers import pipeline
-    except Exception as e:
-        raise RuntimeError(
-            "Install transformers+torch+soundfile+librosa:\n"
-            "  pip install transformers torch soundfile librosa"
-        ) from e
+    with Spinner("Loading Kotoba Whisper model"):
+        try:
+            from transformers import pipeline
+        except Exception as e:
+            raise RuntimeError(
+                "Install transformers+torch+soundfile+librosa:\n"
+                "  pip install transformers torch soundfile librosa"
+            ) from e
 
-    try:
-        import torch
+        try:
+            import torch
 
-        device = 0 if torch.cuda.is_available() else -1
-    except Exception:
-        device = -1
+            device = 0 if torch.cuda.is_available() else -1
+        except Exception:
+            device = -1
 
-    asr = pipeline(
-        "automatic-speech-recognition",
-        model=_KOTOBA_ID,
-        device=device,
-    )
-    _kotoba_asr = asr
+        asr = pipeline(
+            "automatic-speech-recognition",
+            model=_KOTOBA_ID,
+            device=device,
+        )
+        _kotoba_asr = asr
+    
+    print("[voice_input] ✓ Kotoba model loaded", file=sys.stderr)
     return _kotoba_asr
 
 
 def _load_reazonspeech_k2():
     """
     Load / cache the ReazonSpeech k2-v2 model.
-
-    Requires the ReazonSpeech k2 ASR package, e.g.:
-      git clone https://github.com/reazon-research/ReazonSpeech
-      uv pip install ReazonSpeech/pkg/k2-asr
     """
     global _k2_model
     if _k2_model is not None:
         return _k2_model
-    try:
-        from reazonspeech.k2.asr import load_model
-    except ImportError as e:
-        raise RuntimeError(
-            "Install ReazonSpeech k2 ASR first.\n"
-            "See: https://github.com/reazon-research/ReazonSpeech"
-        ) from e
+    
+    with Spinner("Loading ReazonSpeech k2 model"):
+        try:
+            from reazonspeech.k2.asr import load_model
+        except ImportError as e:
+            raise RuntimeError(
+                "Install ReazonSpeech k2 ASR first.\n"
+                "See: https://github.com/reazon-research/ReazonSpeech"
+            ) from e
 
-    _k2_model = load_model()
+        _k2_model = load_model()
+    
+    print("[voice_input] ✓ ReazonSpeech k2 model loaded", file=sys.stderr)
     return _k2_model
 
 
@@ -158,7 +205,6 @@ def transcribe_numpy_kotoba(
     if audio.size == 0:
         return ""
 
-    # Hard cap length (~30s) to match k2's sweet spot and speed things up
     max_seconds = 30.0
     max_samples = int(sample_rate * max_seconds)
     if audio.shape[0] > max_samples:
@@ -221,13 +267,11 @@ def transcribe_numpy_k2(audio: np.ndarray, sample_rate: int = SAMPLE_RATE) -> st
     if audio.size == 0:
         return ""
 
-    # k2 model is also designed for ~30s clips
     max_seconds = 30.0
     max_samples = int(sample_rate * max_seconds)
     if audio.shape[0] > max_samples:
         audio = audio[:max_samples]
 
-    # recorder already uses 16k, but be safe
     audio, sample_rate = _ensure_16k(audio, sample_rate)
 
     fd, tmp = tempfile.mkstemp(suffix=".wav")
@@ -262,19 +306,34 @@ def _transcribe_with_timing(
     audio: np.ndarray,
     sample_rate: int,
     engine: str,
+    show_spinner: bool = True,
 ) -> tuple[str, float]:
     t0 = time.perf_counter()
-    if engine == "kotoba":
-        text = transcribe_numpy_kotoba(audio, sample_rate=sample_rate)
-    elif engine == "reazonspeech-k2":
-        text = transcribe_numpy_k2(audio, sample_rate=sample_rate)
-    else:
-        raise ValueError(f"Unknown engine: {engine}")
+    
+    if show_spinner:
+        spinner = Spinner(f"ASR ({engine})")
+        spinner.start()
+    
+    try:
+        if engine == "kotoba":
+            text = transcribe_numpy_kotoba(audio, sample_rate=sample_rate)
+        elif engine == "reazonspeech-k2":
+            text = transcribe_numpy_k2(audio, sample_rate=sample_rate)
+        else:
+            raise ValueError(f"Unknown engine: {engine}")
+    finally:
+        if show_spinner:
+            spinner.stop()
+    
     t1 = time.perf_counter()
     return text, t1 - t0
 
 
-def transcribe_wav_bytes(data: bytes, engine: str = "reazonspeech-k2") -> tuple[str, float]:
+def transcribe_wav_bytes(
+    data: bytes,
+    engine: str = "reazonspeech-k2",
+    show_spinner: bool = True,
+) -> tuple[str, float]:
     """
     Transcribe a WAV byte stream (e.g., piped over SSH). Returns (text, seconds).
     """
@@ -282,7 +341,7 @@ def transcribe_wav_bytes(data: bytes, engine: str = "reazonspeech-k2") -> tuple[
 
     audio, sr = sf.read(io.BytesIO(data), dtype="float32")
     audio = np.array(audio, dtype=np.float32)
-    return _transcribe_with_timing(audio, sample_rate=sr, engine=engine)
+    return _transcribe_with_timing(audio, sample_rate=sr, engine=engine, show_spinner=show_spinner)
 
 
 def record_and_transcribe(
@@ -315,25 +374,17 @@ def _run_compare_mode(args: argparse.Namespace):
         audio = record_audio(args.duration, verbose=False)
         sr = SAMPLE_RATE
 
-    # Optional pad
     if args.pad_seconds and args.pad_seconds > 0:
         audio = _pad_audio_array(audio, sr, args.pad_seconds)
 
     audio = np.array(audio, dtype=np.float32)
 
-    # --- Kotoba ---
     print("[compare] Running Kotoba Whisper…")
-    kotoba_text, kotoba_time = _transcribe_with_timing(
-        audio.copy(), sr, "kotoba"
-    )
+    kotoba_text, kotoba_time = _transcribe_with_timing(audio.copy(), sr, "kotoba")
 
-    # --- ReazonSpeech-k2 ---
     print("[compare] Running ReazonSpeech-k2…")
-    k2_text, k2_time = _transcribe_with_timing(
-        audio.copy(), sr, "reazonspeech-k2"
-    )
+    k2_text, k2_time = _transcribe_with_timing(audio.copy(), sr, "reazonspeech-k2")
 
-    # --- Results ---
     print("\n=== 📝 Results ===")
     print(f"Kotoba: {kotoba_text}")
     print(f"Reazon (k2): {k2_text}")
@@ -391,11 +442,101 @@ def _parse_args():
         action="store_true",
         help="Read a WAV stream from stdin (useful when piping mic audio over SSH)",
     )
+    parser.add_argument(
+        "--llm",
+        action="store_true",
+        help="Pass ASR output to LLM and return the response",
+    )
+    parser.add_argument(
+        "--conversation",
+        action="store_true",
+        help="Enable multi-turn conversation mode with history (reads length-prefixed WAV chunks)",
+    )
     return parser.parse_args()
+
+
+def _run_conversation_mode(engine: str):
+    """
+    Multi-turn conversation mode with full history support.
+    """
+    import struct
+    from LLM import run_llm_COSTAR
+
+    history: list[tuple[str, str]] = []
+
+    print("[conversation] READY", flush=True)
+
+    while True:
+        len_bytes = sys.stdin.buffer.read(4)
+        if not len_bytes or len(len_bytes) < 4:  # Fixed: was len(len(bytes))
+            print("[conversation] Connection closed.", flush=True)
+            break
+
+        wav_len = struct.unpack(">I", len_bytes)[0]
+
+        if wav_len == 0:
+            print("[conversation] Exit signal received. Goodbye!", flush=True)
+            break
+
+        wav_data = b""
+        remaining = wav_len
+        while remaining > 0:
+            chunk = sys.stdin.buffer.read(min(remaining, 65536))
+            if not chunk:
+                break
+            wav_data += chunk
+            remaining -= len(chunk)
+
+        if len(wav_data) < wav_len:
+            print(f"[conversation] Incomplete WAV ({len(wav_data)}/{wav_len})", file=sys.stderr, flush=True)
+            break
+
+        print(f"[conversation] Received {wav_len} bytes, transcribing...", flush=True)
+        
+        # ASR with spinner
+        try:
+            text, asr_time = transcribe_wav_bytes(wav_data, engine=engine, show_spinner=True)
+        except Exception as e:
+            print(f"[ASR_ERROR] {e}", flush=True)
+            continue
+
+        print(f"[ASR] {text}", flush=True)
+        print(f"[ASR_TIME] {asr_time:.3f}s", flush=True)
+
+        if not text.strip():
+            print("[conversation] Empty transcription, skipping LLM.", flush=True)
+            print("[RESPONSE] (音声が認識できませんでした)", flush=True)
+            continue
+
+        # LLM with spinner
+        try:
+            spinner = Spinner("LLM generating")
+            spinner.start()
+            t_llm = time.perf_counter()
+            llm_response = run_llm_COSTAR(text.strip(), history=history)
+            llm_time = time.perf_counter() - t_llm
+            spinner.stop()
+        except Exception as e:
+            spinner.stop()
+            print(f"[LLM_ERROR] {e}", flush=True)
+            continue
+
+        print(f"[LLM_TIME] {llm_time:.3f}s", flush=True)
+
+        history.append(("user", text.strip()))
+        history.append(("ai", llm_response))
+
+        print(f"[RESPONSE] {llm_response}", flush=True)
+        print(f"[TURN] {len(history) // 2}", flush=True)
 
 
 if __name__ == "__main__":
     args = _parse_args()
+
+    # ========= CONVERSATION MODE =========
+    if args.conversation:
+        _run_conversation_mode(args.engine)
+        sys.exit(0)
 
     # ========= COMPARE MODE (early exit) =========
     if args.compare:
@@ -404,18 +545,35 @@ if __name__ == "__main__":
 
     # ========= STDIN WAV MODE =========
     if args.stdin_wav:
+        print("[voice_input] Reading WAV from stdin...", file=sys.stderr)
         data = sys.stdin.buffer.read()
         if not data:
             print("[voice_input] No stdin data received.", file=sys.stderr)
             sys.exit(1)
-        text, elapsed = transcribe_wav_bytes(data, engine=args.engine)
-        print(f"Final text (stdin, engine={args.engine}): {text}")
-        print(f"[voice_input] {args.engine} time: {elapsed:.3f}s")
+        
+        print(f"[voice_input] Received {len(data)} bytes", file=sys.stderr)
+        text, elapsed = transcribe_wav_bytes(data, engine=args.engine, show_spinner=True)
+        print(f"[ASR] {text}")
+        print(f"[ASR_TIME] {elapsed:.3f}s")
+
+        # If --llm flag is set, pass the transcribed text to LLM
+        if args.llm and text.strip():
+            from LLM import run_llm_COSTAR
+
+            spinner = Spinner("LLM generating")
+            spinner.start()
+            t0 = time.perf_counter()
+            llm_response = run_llm_COSTAR(text.strip())
+            t1 = time.perf_counter()
+            spinner.stop()
+            
+            print(f"[LLM] {llm_response}")
+            print(f"[LLM_TIME] {t1 - t0:.3f}s")
+
         sys.exit(0)
 
     # ========= NORMAL SINGLE-ENGINE MODE =========
     if args.file:
-        # File → single engine
         t0 = time.perf_counter()
         if args.engine == "kotoba":
             text = transcribe_file_kotoba(args.file, pad_seconds=args.pad_seconds)
@@ -425,7 +583,6 @@ if __name__ == "__main__":
         print(f"Final text (file, engine={args.engine}): {text}")
         print(f"[voice_input] {args.engine} time: {t1 - t0:.3f}s")
     else:
-        # Mic → single engine
         record_and_transcribe(
             duration=args.duration,
             save_wav_path=args.save_wav,
