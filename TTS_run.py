@@ -1,6 +1,7 @@
 from pathlib import Path
 from typing import Optional
 
+import sounddevice as sd  # Add this import
 import soundfile as sf
 from huggingface_hub import hf_hub_download
 
@@ -104,3 +105,73 @@ def tts_read(
 
     save_path.parent.mkdir(parents=True, exist_ok=True)
     sf.write(str(save_path), audio, samplerate=sr)
+
+
+def tts_speak(
+    text: str,
+    *,
+    style: str = "Neutral",
+    style_weight: float = 5.0,
+    length: float = 1.0,
+    pitch_scale: float = 1.0,
+    intonation_scale: float = 1.0,
+) -> None:
+    """
+    Synthesize and immediately play audio (blocking).
+    """
+    if not text:
+        return
+
+    _init_model()
+    assert _model is not None
+
+    sr, audio = _model.infer(
+        text=text,
+        language=Languages.JP,
+        style=style,
+        style_weight=style_weight,
+        length=length,
+        pitch_scale=pitch_scale,
+        intonation_scale=intonation_scale,
+    )
+
+    # Play audio directly
+    sd.play(audio, samplerate=sr)
+    sd.wait()
+
+
+def tts_synthesize(
+    text: str,
+    *,
+    style: str = "Neutral",
+    style_weight: float = 5.0,
+    length: float = 1.0,
+    pitch_scale: float = 1.0,
+    intonation_scale: float = 1.0,
+) -> bytes:
+    """
+    Synthesize text to speech and return WAV bytes (for streaming).
+    """
+    if not text:
+        return b""
+
+    _init_model()
+    assert _model is not None
+
+    sr, audio = _model.infer(
+        text=text,
+        language=Languages.JP,
+        style=style,
+        style_weight=style_weight,
+        length=length,
+        pitch_scale=pitch_scale,
+        intonation_scale=intonation_scale,
+    )
+
+    # Convert to WAV bytes
+    import io
+
+    buffer = io.BytesIO()
+    sf.write(buffer, audio, samplerate=sr, format="WAV")
+    buffer.seek(0)
+    return buffer.read()

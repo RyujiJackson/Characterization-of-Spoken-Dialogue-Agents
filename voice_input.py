@@ -1,7 +1,9 @@
-import argparse
+"""
+ASR (Automatic Speech Recognition) module.
+Provides transcription using Kotoba Whisper and ReazonSpeech k2.
+"""
 import io
 import os
-import sys
 import tempfile
 import time
 import numpy as np
@@ -146,88 +148,3 @@ def transcribe_wav_bytes(data: bytes, engine: str = "reazonspeech-k2") -> tuple[
         text = transcribe_numpy_k2(audio, sample_rate=sr)
     
     return text, time.perf_counter() - t0
-
-
-def _run_conversation_mode(engine: str):
-    """Multi-turn conversation mode with full history support."""
-    import struct
-    from LLM import run_llm_COSTAR
-
-    history: list[tuple[str, str]] = []
-
-    print(f"[conversation] READY", flush=True)
-
-    while True:
-        len_bytes = sys.stdin.buffer.read(4)
-        if not len_bytes or len(len_bytes) < 4:
-            print("[conversation] Connection closed.", flush=True)
-            break
-
-        wav_len = struct.unpack(">I", len_bytes)[0]
-
-        if wav_len == 0:
-            print("[conversation] Exit signal received. Goodbye!", flush=True)
-            break
-
-        wav_data = b""
-        remaining = wav_len
-        while remaining > 0:
-            chunk = sys.stdin.buffer.read(min(remaining, 65536))
-            if not chunk:
-                break
-            wav_data += chunk
-            remaining -= len(chunk)
-
-        if len(wav_data) < wav_len:
-            print(f"[conversation] Incomplete WAV ({len(wav_data)}/{wav_len})", flush=True)
-            break
-
-        # ASR
-        print(f"[ASR_START]", flush=True)
-        try:
-            text, asr_time = transcribe_wav_bytes(wav_data, engine=engine)
-        except Exception as e:
-            print(f"[ASR_ERROR] {e}", flush=True)
-            continue
-
-        print(f"[ASR] {text}", flush=True)
-        print(f"[ASR_TIME] {asr_time:.3f}s", flush=True)
-
-        if not text.strip():
-            print("[RESPONSE] (音声が認識できませんでした)", flush=True)
-            continue
-
-        # LLM
-        print(f"[LLM_START]", flush=True)
-        try:
-            t_llm = time.perf_counter()
-            llm_response = run_llm_COSTAR(text.strip(), history=history)
-            llm_time = time.perf_counter() - t_llm
-        except Exception as e:
-            print(f"[LLM_ERROR] {e}", flush=True)
-            continue
-
-        print(f"[LLM_TIME] {llm_time:.3f}s", flush=True)
-
-        history.append(("user", text.strip()))
-        history.append(("ai", llm_response))
-
-        print(f"[RESPONSE] {llm_response}", flush=True)
-        print(f"[TURN] {len(history) // 2}", flush=True)
-
-
-if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Voice input server")
-    parser.add_argument(
-        "--engine",
-        choices=["kotoba", "reazonspeech-k2"],
-        default="reazonspeech-k2",
-    )
-    parser.add_argument("--conversation", action="store_true")
-    args = parser.parse_args()
-
-    if args.conversation:
-        _run_conversation_mode(args.engine)
-    else:
-        print("Usage: python voice_input.py --engine reazonspeech-k2 --conversation")
-        sys.exit(1)

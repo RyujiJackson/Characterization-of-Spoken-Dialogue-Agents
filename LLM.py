@@ -1,5 +1,7 @@
 import torch
-from transformers import AutoModelForCausalLM, AutoTokenizer
+from transformers import AutoModelForCausalLM, AutoTokenizer, TextIteratorStreamer
+from threading import Thread
+from typing import Generator
 
 # モデル読み込み
 model_path = "llm-jp/llm-jp-3.1-1.8b-instruct4"
@@ -234,3 +236,58 @@ def run_llm_COSTAR(user: str, history: list[tuple[str, str]] | None = None) -> s
         final_answer = "さっきと同じことを繰り返しそうだから、もう少し具体的に話すね。今の話題で特に知りたいことってどのあたり？"
 
     return final_answer
+
+
+def stream_llm_COSTAR(user: str, history: list[tuple[str, str]] | None = None) -> Generator[str, None, None]:
+    """
+    Streaming version - yields text chunks as they're generated.
+    """
+    if history is None:
+        history = []
+
+    MAX_TURNS = 4
+    short_history = history[-MAX_TURNS:]
+
+    history_text = ""
+    for role, text in short_history:
+        label = "ユーザー" if role == "user" else "AI"
+        history_text += f"{label}: {text}\n"
+
+    merged_context = history_text + f"ユーザー: {user}\n"
+    prompt = build_costar_prompt(context=merged_context, last_user=user)
+
+    inputs = tokenizer(
+        prompt,
+        return_tensors="pt",
+        add_special_tokens=True,
+    ).to(model.device)
+
+    if "token_type_ids" in inputs:
+        del inputs["token_type_ids"]
+
+    # Create streamer
+    streamer = TextIteratorStreamer(
+        tokenizer, 
+        skip_prompt=True, 
+        skip_special_tokens=True
+    )
+
+    # Run generation in background thread
+    generation_kwargs = dict(
+        **inputs,
+        max_new_tokens=64,
+        do_sample=True,
+        top_p=0.9,
+        temperature=0.7,
+        pad_token_id=tokenizer.eos_token_id,
+        streamer=streamer,
+    )
+    
+    thread = Thread(target=model.generate, kwargs=generation_kwargs)
+    thread.start()
+
+    # Yield tokens as they arrive
+    for text in streamer:
+        yield text
+
+    thread.join()
