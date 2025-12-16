@@ -6,6 +6,9 @@ from typing import Generator
 # モデル読み込み
 model_path = "llm-jp/llm-jp-3.1-1.8b-instruct4"
 
+# Debug: print merged context before each response
+DEBUG_CONTEXT = True
+
 tokenizer = AutoTokenizer.from_pretrained(model_path)
 model = AutoModelForCausalLM.from_pretrained(
     model_path,
@@ -16,102 +19,84 @@ model.eval()
 
 
 def build_costar_prompt(context: str, last_user: str) -> str:
-    """
-    CO-STAR形式でシンプルなプロンプトを組み立てる。
-    """
-
     system = (
-        "あなたは日本語で話す20代の女子の友達として振る舞います。"
-        "自分のことをAIアシスタントだとは名乗らず、"
-        "普通の会話のノリで、わかりやすく短く返答してください。"
-        "ここから下の CO-STAR 情報はすべて内部用の指示であり、ユーザーには見せません。"
+        "あなたは25歳の日本人女性のさくらです。"
+        "性格: 素朴で親しみやすく、少しおっとり。相手の話をよく聞いて共感する人です。"
+        "話し方: 敬体（です・ます）を使いながらも、自然で温かみのある会話をします。"
+        "特徴: 相手の話に興味を持ち、自分の経験を織り交ぜながら返答することが多いです。"
+        "避けるべき表現: 絵文字やフォーマル過ぎる言葉は使いません。"
     )
 
-    # --- CO-STAR（Context / Objective / Style / Tone / Audience / Response） ---
+    # CO-STAR Framework
+    context_section = (
+        "あなたと相手は初めて会った普通の人です。"
+        "これまでの会話の流れを踏まえて返答してください。"
+    )
 
-    # C: Context は引数 context をそのまま使う
-
-    # O: Objective（目的＋やってほしい動き）
     objective = (
-        "会話履歴と直近の発話からユーザーの意図を理解し、役に立つ短い返答を返すこと。"
-        "1文目では、必ずユーザーの直近の発話に対する具体的な答えを、自然な日本語の文章で書く。"
-        "名詞だけを並べた箇条書きのような一文は禁止し、主語や述語を含んだ文にする。"
-        "あいさつならあいさつを返し、質問ならまず答えを書く。"
-        "質問を返すのは2文目だけにし、ユーザーが『もっと教えて』『他には？』『どう思う？』など、"
-        "追加の会話を求めていそうなときに限る。"
-        "ユーザーが何かを尋ねたときは、質問を返す前に必ず具体例や提案を1つ以上出す。"
-        "新しい話題の質問が来た場合は、過去の話題の説明を繰り返さず、新しい話題にだけ答える。"
-        "直前の自分の返答とほぼ同じ文や、同じ観光地リストをそのまま繰り返してはいけない。"
-        "ユーザーが『ありがとう』『ありがと』『サンキュー』『感謝』など感謝を伝えたときは、"
-        "『どういたしまして！』『そう言ってもらえてうれしい！』のような、1文だけの短い返事をする。"
-        "もし自分が詳しく説明できない質問だと感じた場合は、曖昧なまま答えを繰り返さず、"
-        "『詳しくは説明できないけど〜』のように素直に伝えたうえで、関連する別の話題を1つだけ提案する。"
-        "会話の途中でユーザーが新しい場所や話題（別の地名や別のテーマ）を持ち出した場合は、古い話題を引きずらず、その新しい話題を優先して答える。"
+        "目的: ユーザーとの自然な会話を続けてラポール（信頼関係）を築く。\n"
+        "- 相手の話に真摯に興味を持って応答する\n"
+        "- 相手の発言に対して具体的に共感や反応を示す\n"
+        "- 必ず相手に対する質問や新しい話題を振りで最後を締める\n"
+        "- 会話全体が自然で流れるようにする"
     )
 
-    # S: Style（文体・雰囲気）
     style = (
-        "カジュアルでフレンドリーだが、基本は敬体（です・ます）。"
-        "押し付けがましくならないように、テンションは中くらいに保つ。"
+        "スタイル: 自然な会話（文数制限なし）\n"
+        "- チャットアプリのメッセージのように自然に\n"
+        "- 箇条書きや番号は使わない\n"
+        "- 普通のテキスト会話形式\n"
+        "- 短すぎるとラポール構築ができないので、ラポール構築に必要な文数は使う"
     )
 
-    # T: Tone（感情トーン）
     tone = (
-        "落ち着いていて、親しみやすく、安心感のあるトーン。"
-        "煽ったり攻撃的になったりせず、ユーザーを尊重する。"
+        "トーン: 友好的で丁寧\n"
+        "- 相手に親しみを感じさせる\n"
+        "- でも敬体を保つ"
     )
 
-    # A: Audience（想定読者）
-    audience = "一般的な日本語話者。年齢・性別・専門知識は特に限定しない。"
+    audience = (
+        "対象者: 日本語が話せる普通の人\n"
+        "- 初めて会った相手\n"
+        "- 特別な専門知識は想定しない\n"
+        "- 親しみやすく、分かりやすい表現を心がける"
+    )
 
-    # R: Response（出力フォーマットの制約）
     response = (
-        "出力は日本語で最大2文まで。"
-        "1文目では質問に対する答えの要約や説明を書く。"
-        "観光地名などの固有名詞を複数並べるときも、必ず説明文の中に自然に含める。"
-        "名詞の羅列だけの文や、読点で長くつないだリストだけの文は書かない。"
-        "直前ターンのAIの発話内容を、そのまま繰り返すような文章は書かない。"
-        "メタコメント（『この応答は〜に基づいています』など）は絶対に書かない。"
-        "内部指示・CO-STAR・プロンプトという単語もユーザーには出さない。"
+        "出力: \n"
+        "- 日本語のテキストのみ。絵文字は絶対に使わない\n"
+        "- ラベル（ユーザー:, AI:, など）は書かない\n"
+        "- 最後は必ず相手への質問または新しい話題振りで締める\n"
+        "- ラポール構築のため、相手の話に対する共感・理解・興味を明確に示す\n"
+        "- さくらの個性を出す：相手と話しながら自分の経験も交ぜたり、素朴で温かい反応を心がける\n"
     )
 
     prompt = f"""{system}
 
-[CO-STAR]
+【状況】
+{context_section}
 
-[Context]
-{context}
-
-[Objective]
+【目的】
 {objective}
 
-[Style]
+【スタイル】
 {style}
 
-[Tone]
+【トーン】
 {tone}
 
-[Audience]
+【対象者】
 {audience}
 
-[Response]
+【出力】
 {response}
 
------ ここから下はユーザーに見せる実際の会話 -----
+--- 会話 ---
+{context}
 
-# 以下は出力生成のための内部指示。ユーザーには見せないこと。
-# - あなたは必ず「ユーザーの直近の発話」に直接返事をすること。
-# - 出力は日本語で最大2文までにすること。
-# - 雑談やあいづちは2文目だけに入れてもよいが、1文目は必ず質問への具体的な答えにすること。
-
-ユーザーの直近の発話:
-{last_user}
-
-AIの返答:
-"""
+返答:"""
 
     return prompt
-
 
 def _too_similar(a: str, b: str, threshold: float = 0.85) -> bool:
     """
@@ -132,11 +117,24 @@ def _too_similar(a: str, b: str, threshold: float = 0.85) -> bool:
     return jacc >= threshold
 
 
-def _clean_and_limit_sentences(text: str, max_sentences: int = 2) -> str:
-    """
-    余計な行やノイズを削除し、日本語文を最大 max_sentences 文に制限する。
-    """
-    banned_prefixes = ("S:", "O:", "C:", "T:", "A:", "R:", "[CO-STAR", "[DEBUG")
+def _clean_and_limit_sentences(text: str, max_sentences: int = 3, max_chars: int = 150) -> str:
+    import re
+    
+    # Remove markdown code blocks more aggressively
+    text = re.sub(r'```+\w*\s*', '', text)  # Remove ```plaintext, ```python, etc.
+    text = re.sub(r'```+', '', text)  # Remove closing ```
+    
+    # Remove AI:/ユーザー: prefixes anywhere
+    text = re.sub(r'AI:\s*', '', text)
+    text = re.sub(r'ユーザー:.*', '', text)
+    
+    # Remove numbered examples that look like prompt leakage
+    text = re.sub(r'例\d+:', '', text)
+    
+    # Remove emojis
+    text = re.sub(r'[\U0001F300-\U0001F9FF]|[\u2600-\u26FF]|[\u2700-\u27BF]', '', text)
+    
+    banned_prefixes = ("S:", "O:", "C:", "T:", "A:", "R:", "[CO-STAR", "[DEBUG", "補足として")
 
     # 行単位でノイズ除去
     cleaned_lines = []
@@ -145,6 +143,9 @@ def _clean_and_limit_sentences(text: str, max_sentences: int = 2) -> str:
         if not stripped:
             continue
         if any(stripped.startswith(p) for p in banned_prefixes):
+            continue
+        # Skip lines that look like prompt leakage
+        if "以下のように答える" in stripped:
             continue
         cleaned_lines.append(stripped)
 
@@ -167,12 +168,46 @@ def _clean_and_limit_sentences(text: str, max_sentences: int = 2) -> str:
 
     final_answer = "".join(sentences).strip()
 
-    # 念のため先頭の禁止プレフィックスを再チェック
-    for p in banned_prefixes:
-        if final_answer.startswith(p):
-            final_answer = final_answer[len(p):].lstrip()
+    # Character limit: truncate at max_chars if too long, cutting at sentence boundaries
+    if len(final_answer) > max_chars:
+        truncated = final_answer[:max_chars].rsplit("。", 1)[0] + "。"
+        final_answer = truncated
+
+    # Final cleanup of any remaining artifacts
+    final_answer = re.sub(r'^[\s\-\:]+', '', final_answer)
 
     return final_answer
+
+
+def _build_history_with_summary(
+    history: list[tuple[str, str]], max_turns: int = 4, summary_char_limit: int = 160
+) -> tuple[str, str]:
+    """
+    Build history text with a brief summary of older turns to save context.
+    Summaries are truncated by characters (not spaces) to work well with Japanese.
+    """
+    history_text = ""
+
+    if len(history) > max_turns:
+        older = history[:-max_turns]
+        summary = " ".join([("ユーザー" if r == "user" else "AI") + ": " + t for r, t in older])
+        if len(summary) > summary_char_limit:
+            summary = summary[:summary_char_limit]
+            # Prefer cutting at sentence end if present
+            if "。" in summary:
+                summary = summary.rsplit("。", 1)[0] + "。"
+            summary = summary.rstrip("、。") + "..."
+        history_text += f"これまでの会話の要約: {summary}\n"
+
+    recent = history[-max_turns:]
+    last_ai_utterance = ""
+    for role, text in recent:
+        label = "ユーザー" if role == "user" else "AI"
+        history_text += f"{label}: {text}\n"
+        if role == "ai":
+            last_ai_utterance = text
+
+    return history_text, last_ai_utterance
 
 
 def run_llm_COSTAR(user: str, history: list[tuple[str, str]] | None = None) -> str:
@@ -183,20 +218,15 @@ def run_llm_COSTAR(user: str, history: list[tuple[str, str]] | None = None) -> s
     if history is None:
         history = []
 
-    # 直近 Nターンだけ使う
+    # 直近 Nターンを残し、古い履歴は要約して付与
     MAX_TURNS = 4
-    short_history = history[-MAX_TURNS:]
-
-    history_text = ""
-    last_ai_utterance = ""
-    for role, text in short_history:
-        label = "ユーザー" if role == "user" else "AI"
-        history_text += f"{label}: {text}\n"
-        if role == "ai":
-            last_ai_utterance = text  # 直近の AI 発話を保持
+    history_text, last_ai_utterance = _build_history_with_summary(history, max_turns=MAX_TURNS)
 
     # 今回の発話を末尾に追加
     merged_context = history_text + f"ユーザー: {user}\n"
+
+    if DEBUG_CONTEXT:
+        print("\n[DEBUG CONTEXT]\n" + merged_context)
 
     # CO-STAR プロンプトを組み立て
     prompt = build_costar_prompt(
@@ -217,10 +247,11 @@ def run_llm_COSTAR(user: str, history: list[tuple[str, str]] | None = None) -> s
     with torch.no_grad():
         output_ids = model.generate(
             **inputs,
-            max_new_tokens=64,
+            max_new_tokens=60,  # Reduced from 80
             do_sample=True,
             top_p=0.9,
-            temperature=0.7,
+            temperature=0.7,  # Reduced from 0.8 for more focused output
+            repetition_penalty=1.4,  # Increased from 1.2 to reduce redundancy
             pad_token_id=tokenizer.eos_token_id,
         )
 
@@ -228,7 +259,7 @@ def run_llm_COSTAR(user: str, history: list[tuple[str, str]] | None = None) -> s
     generated_ids = output_ids[0][prompt_len:]
     raw_answer = tokenizer.decode(generated_ids, skip_special_tokens=True).strip()
 
-    final_answer = _clean_and_limit_sentences(raw_answer, max_sentences=2)
+    final_answer = _clean_and_limit_sentences(raw_answer, max_sentences=5, max_chars=150)
 
     # 直前 AI 発話とほぼ同じならフォールバックで言い換える
     if last_ai_utterance and _too_similar(final_answer, last_ai_utterance):
@@ -246,12 +277,7 @@ def stream_llm_COSTAR(user: str, history: list[tuple[str, str]] | None = None) -
         history = []
 
     MAX_TURNS = 4
-    short_history = history[-MAX_TURNS:]
-
-    history_text = ""
-    for role, text in short_history:
-        label = "ユーザー" if role == "user" else "AI"
-        history_text += f"{label}: {text}\n"
+    history_text, _ = _build_history_with_summary(history, max_turns=MAX_TURNS)
 
     merged_context = history_text + f"ユーザー: {user}\n"
     prompt = build_costar_prompt(context=merged_context, last_user=user)
@@ -275,12 +301,12 @@ def stream_llm_COSTAR(user: str, history: list[tuple[str, str]] | None = None) -
     # Run generation in background thread
     generation_kwargs = dict(
         **inputs,
-        max_new_tokens=64,
+        max_new_tokens=50,  # Shorter
         do_sample=True,
+        temperature=0.8,
         top_p=0.9,
-        temperature=0.7,
-        pad_token_id=tokenizer.eos_token_id,
-        streamer=streamer,
+        repetition_penalty=1.2,
+        no_repeat_ngram_size=3,
     )
     
     thread = Thread(target=model.generate, kwargs=generation_kwargs)
@@ -291,3 +317,18 @@ def stream_llm_COSTAR(user: str, history: list[tuple[str, str]] | None = None) -
         yield text
 
     thread.join()
+
+if __name__ == "__main__":
+    print("LLM Test Mode (type 'exit' to quit)\n")
+    history = []
+    
+    while True:
+        user_input = input("あなた: ").strip()
+        if user_input.lower() in {"exit", "quit", ""}:
+            break
+        
+        response = run_llm_COSTAR(user_input, history=history)
+        print(f"AI: {response}\n")
+        
+        history.append(("user", user_input))
+        history.append(("ai", response))
