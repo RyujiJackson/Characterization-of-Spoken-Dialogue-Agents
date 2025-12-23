@@ -7,37 +7,37 @@ import threading
 import queue
 
 # Import functions from your scripts
-from LLM import run_llm_COSTAR, stream_llm_COSTAR
+from llm_sarashina import respond
 from TTS_run import tts_read, tts_synthesize, tts_speak
 from voice_input import transcribe_wav_bytes
 
 
-def stream_and_speak(user_text: str, history: list[tuple[str, str]]) -> str:
+def stream_and_speak(user_text: str, history: list[dict]) -> str:
     """
     Stream LLM tokens and start TTS as soon as a sentence is complete.
     Returns the full response text.
     """
     sentence_endings = {"。", "！", "？", "!", "?"}
-    buffer = ""
-    full_response = ""
+    
+    result = respond(user_text, history=history, max_new_tokens=60, temperature=0.8)
+    full_response = result["text"]
+    updated_history = result["history"]
     
     print("AI: ", end="", flush=True)
     
-    for chunk in stream_llm_COSTAR(user_text, history=history):
-        print(chunk, end="", flush=True)
-        buffer += chunk
-        full_response += chunk
+    # Split response into sentences and speak them
+    buffer = ""
+    for char in full_response:
+        print(char, end="", flush=True)
+        buffer += char
         
-        # Check if we have a complete sentence
         for ending in sentence_endings:
             if ending in buffer:
-                # Split at the sentence boundary
                 idx = buffer.index(ending) + 1
                 sentence = buffer[:idx].strip()
                 buffer = buffer[idx:]
                 
                 if sentence:
-                    # Speak this sentence immediately (in background)
                     threading.Thread(
                         target=tts_speak,
                         args=(sentence,),
@@ -50,7 +50,7 @@ def stream_and_speak(user_text: str, history: list[tuple[str, str]]) -> str:
         tts_speak(buffer.strip())
     
     print()  # newline after streaming
-    return full_response
+    return full_response, updated_history
 
 
 def run_text_chat():
@@ -59,7 +59,7 @@ def run_text_chat():
     print("Type your message and press Enter.")
     print("Type 'exit' or 'quit' to end the chat.\n")
 
-    history: list[tuple[str, str]] = []
+    history = None
 
     while True:
         user_text = input("あなた: ").strip()
@@ -69,19 +69,15 @@ def run_text_chat():
             break
 
         t0 = time.perf_counter()
-        llm_output = stream_and_speak(user_text, history)
+        llm_output, history = stream_and_speak(user_text, history)
         total_time = time.perf_counter() - t0
 
-        # Update history after completion
-        history.append(("user", user_text))
-        history.append(("assistant", llm_output))
-
-        print(f"[DEBUG] Total time (LLM+TTS streamed): {total_time:.3f} 秒\n")
+        print(f"[DEBUG] Total time (LLM+TTS): {total_time:.3f} 秒\n")
 
 
 def run_conversation_mode(engine: str = "reazonspeech-k2"):
     """Multi-turn voice conversation mode with streaming TTS."""
-    history: list[tuple[str, str]] = []
+    history = None
     sentence_endings = {"。", "！", "？", "!", "?"}
 
     print("[conversation] READY", flush=True)
@@ -126,26 +122,22 @@ def run_conversation_mode(engine: str = "reazonspeech-k2"):
             print("[RESPONSE] (音声が認識できませんでした)", flush=True)
             continue
 
-        # LLM Streaming + TTS Pipelining
+        # LLM + TTS
         print("[LLM_START]", flush=True)
         t_llm_start = time.perf_counter()
         
-        buffer = ""
-        full_response = ""
-        sentence_count = 0
-        first_token_time = None
-        
         try:
-            for chunk in stream_llm_COSTAR(text.strip(), history=history):
-                if first_token_time is None:
-                    first_token_time = time.perf_counter()
-                    ttft = first_token_time - t_llm_start
-                    print(f"[LLM_TTFT] {ttft:.3f}s", flush=True)  # Time to first token
+            result = respond(text.strip(), history=history, max_new_tokens=60, temperature=0.8)
+            full_response = result["text"]
+            history = result["history"]
+            
+            sentence_count = 0
+            buffer = ""
+            
+            # Process response character by character for TTS chunks
+            for char in full_response:
+                buffer += char
                 
-                buffer += chunk
-                full_response += chunk
-                
-                # Check for complete sentence
                 for ending in sentence_endings:
                     if ending in buffer:
                         idx = buffer.index(ending) + 1
@@ -154,7 +146,6 @@ def run_conversation_mode(engine: str = "reazonspeech-k2"):
                         
                         if sentence:
                             sentence_count += 1
-                            # TTS this sentence and send audio immediately
                             print(f"[TTS_CHUNK_{sentence_count}] {sentence}", flush=True)
                             try:
                                 t_tts = time.perf_counter()
@@ -189,13 +180,9 @@ def run_conversation_mode(engine: str = "reazonspeech-k2"):
 
         llm_time = time.perf_counter() - t_llm_start
         print(f"[LLM_TIME] {llm_time:.3f}s", flush=True)
-
-        history.append(("user", text.strip()))
-        history.append(("ai", full_response))
-
         print(f"[RESPONSE] {full_response}", flush=True)
         print(f"[TURN] {len(history) // 2}", flush=True)
-        print("[AUDIO_DONE]", flush=True)  # Signal all chunks sent
+        print("[AUDIO_DONE]", flush=True)
 
 
 def main():
