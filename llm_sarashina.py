@@ -28,9 +28,11 @@ def build_system_prompt():
         "- 日本語のみ許可される\n"
         "- 括弧やメモ書きで思考を禁止（例: 「〜と思います」「(こうして話します)」は禁止）\n"
         "- 必ず1段落のみで返答する。改行や複数段落は絶対に使わない\n"
+        ""
         "\n"
         "会話のコツ:\n"
         "- 友達と話すような自然な口調（敬語とタメ口を混ぜて）\n"
+        "- 丁寧すぎる敬語はできるだけ使わない"
         "- 相手の話を中心に会話を進める\n"
         "- 質問より、共感や感想を多めに\n"
         "- 「へえ!」「いいね!」「わかる〜」など自然なリアクション\n"
@@ -61,6 +63,10 @@ def build_system_prompt():
         "- 改行を使って複数段落にすること\n"
         "- 3文以上の長い返答"
         "- 思考や方針を括弧書きやナレーションで説明すること"
+        "- 情報提供や案内はしない。観光地の説明・豆知識・おすすめは出さない\n"
+        "- 相手の発話を短くオウム返し＋共感を優先。自分は「へえ、いいね、行ってみたいな」程度にとどめる\n"
+        "- 1〜2文のリアクションのみ。具体的な場所・店名・アクティビティの説明は出さない\n"
+        "- 質問は控えめ（2〜3ターンに1回以下）、質問しても1文で終える"
     )
 
 
@@ -81,11 +87,35 @@ def get_bad_words_ids():
     banned_chars = ["(", "（", "#"]
     bad_words_ids = []
     for char in banned_chars:
-        # Tokenize each character individually
         token_id = tokenizer.encode(char, add_special_tokens=False)
         if token_id:
             bad_words_ids.append(token_id)
     return bad_words_ids
+
+def trim_to_first_question(text: str) -> str:
+    """Keep text up to and including the first '?' (Japanese/ASCII)."""
+    for mark in ["？", "?"]:
+        pos = text.find(mark)
+        if pos != -1:
+            return text[: pos + 1].strip()
+    return text.strip()
+
+
+def trim_to_last_sentence(text: str) -> str:
+    """Trim text to the last complete sentence.
+    Consider enders: Japanese and ASCII (。 ！ ？ . ! ?).
+    If no ender exists, return empty to avoid fragments.
+    """
+    idxs = [
+        text.rfind("。"),
+        text.rfind("！"),
+        text.rfind("？"),
+        text.rfind("."),
+        text.rfind("!"),
+        text.rfind("?")
+    ]
+    last = max(idxs)
+    return text[: last + 1].strip() if last != -1 else ""
 
 
 def respond(user_text: str, history: list[dict] | None = None, max_new_tokens: int = 80, temperature: float = 0.8) -> dict:
@@ -131,11 +161,12 @@ def respond(user_text: str, history: list[dict] | None = None, max_new_tokens: i
 
     generated = tokenizer.decode(outputs[0][inputs["input_ids"].shape[1]:], skip_special_tokens=True)
 
-    # 括弧内の思考を削除（() と（）の両方）
-    cleaned = re.sub(r'[(\（][^)\）]*[)\）]', '', generated).strip()
+    # 文末までで切り、括弧内も除去
+    cleaned = re.sub(r'[\(\（][^\)\）]*[\)\）]', '', generated).strip()
+    cleaned = trim_to_first_question(cleaned)
+    cleaned = trim_to_last_sentence(cleaned)
     
     # 応答を履歴に反映
-    # If cleaned result is empty, don't add an empty assistant message
     if cleaned == "":
         return {"text": cleaned, "history": history}
 
