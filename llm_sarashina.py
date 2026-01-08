@@ -76,7 +76,19 @@ def apply_chat_template(messages: list[str | dict], add_generation_prompt: bool 
     )
 
 
-def respond(user_text: str, history: list[dict] | None = None, max_new_tokens: int = 60, temperature: float = 0.8) -> dict:
+def get_bad_words_ids():
+    """Get token IDs for banned characters: (, （, #"""
+    banned_chars = ["(", "（", "#"]
+    bad_words_ids = []
+    for char in banned_chars:
+        # Tokenize each character individually
+        token_id = tokenizer.encode(char, add_special_tokens=False)
+        if token_id:
+            bad_words_ids.append(token_id)
+    return bad_words_ids
+
+
+def respond(user_text: str, history: list[dict] | None = None, max_new_tokens: int = 80, temperature: float = 0.8) -> dict:
     """音声エージェントから呼び出しやすい応答関数。
     - `history` は過去の会話履歴（system/user/assistant）
     - 戻り値は {"text": 応答テキスト, "history": 更新後履歴}
@@ -106,6 +118,7 @@ def respond(user_text: str, history: list[dict] | None = None, max_new_tokens: i
 
     # トークナイズ + 生成
     inputs = tokenizer(prompt_text, return_tensors="pt").to(model.device)
+    bad_words_ids = get_bad_words_ids()
     with torch.no_grad():
         outputs = model.generate(
             **inputs,
@@ -113,6 +126,7 @@ def respond(user_text: str, history: list[dict] | None = None, max_new_tokens: i
             do_sample=True,
             temperature=temperature,
             pad_token_id=tokenizer.eos_token_id,
+            bad_words_ids=bad_words_ids,
         )
 
     generated = tokenizer.decode(outputs[0][inputs["input_ids"].shape[1]:], skip_special_tokens=True)
@@ -121,6 +135,10 @@ def respond(user_text: str, history: list[dict] | None = None, max_new_tokens: i
     cleaned = re.sub(r'[(\（][^)\）]*[)\）]', '', generated).strip()
     
     # 応答を履歴に反映
+    # If cleaned result is empty, don't add an empty assistant message
+    if cleaned == "":
+        return {"text": cleaned, "history": history}
+
     history = history + [{"role": "assistant", "content": cleaned}]
     return {"text": cleaned, "history": history}
 

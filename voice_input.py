@@ -12,6 +12,7 @@ from scipy.io.wavfile import write as wav_write
 # Config
 SAMPLE_RATE = 16000
 PAD_SECONDS = 0.3
+MAX_AUDIO_DURATION = 60.0  # Increased from 30s to 60s for longer sentences
 _KOTOBA_ID = "kotoba-tech/kotoba-whisper-v2.2"
 
 # Lazy globals
@@ -52,6 +53,8 @@ def _load_reazonspeech_k2():
     return _k2_model
 
 
+
+
 def save_wav(path: str, audio: np.ndarray, sample_rate: int = SAMPLE_RATE) -> None:
     if audio.ndim > 1:
         audio = audio.mean(axis=1)
@@ -77,14 +80,22 @@ def _ensure_16k(audio: np.ndarray, sr: int):
     return audio, sr
 
 
-def transcribe_numpy_kotoba(audio: np.ndarray, sample_rate: int = SAMPLE_RATE) -> str:
+def transcribe_numpy_kotoba(
+    audio: np.ndarray,
+    sample_rate: int = SAMPLE_RATE,
+    hotwords: list[str] | None = None,
+) -> str:
     """Transcribe a numpy array with Kotoba Whisper."""
     if audio.size == 0:
         return ""
 
-    max_samples = int(sample_rate * 30.0)
+    max_samples = int(sample_rate * MAX_AUDIO_DURATION)
+    original_samples = audio.shape[0]
     if audio.shape[0] > max_samples:
+        print(f"[voice_input] Warning: audio truncated: {original_samples} samples ({original_samples/sample_rate:.2f}s) -> {max_samples} samples ({MAX_AUDIO_DURATION:.1f}s)", flush=True)
         audio = audio[:max_samples]
+    else:
+        print(f"[voice_input] Audio accepted: {original_samples} samples ({original_samples/sample_rate:.2f}s)", flush=True)
 
     audio, sample_rate = _ensure_16k(audio, sample_rate)
 
@@ -93,7 +104,21 @@ def transcribe_numpy_kotoba(audio: np.ndarray, sample_rate: int = SAMPLE_RATE) -
     try:
         save_wav(tmp, audio, sample_rate=sample_rate)
         asr = _load_kotoba_asr()
-        res = asr(tmp)
+
+        # Optional biasing via initial prompt (hotwords)
+        generate_kwargs = None
+        if hotwords:
+            try:
+                # Join names; tokenizer builds prompt IDs for Whisper
+                prompt_txt = "、".join(hotwords)
+                # Many Whisper pipelines expose tokenizer.get_prompt_ids
+                prompt_ids = asr.tokenizer.get_prompt_ids(prompt_txt, language="ja")
+                generate_kwargs = {"prompt_ids": prompt_ids}
+            except Exception:
+                # Fallback: no bias if tokenizer doesn't support prompt ids
+                generate_kwargs = None
+
+        res = asr(tmp, generate_kwargs=generate_kwargs) if generate_kwargs else asr(tmp)
         if isinstance(res, dict):
             return res.get("text", "").strip()
         if isinstance(res, list) and res:
@@ -111,9 +136,13 @@ def transcribe_numpy_k2(audio: np.ndarray, sample_rate: int = SAMPLE_RATE) -> st
     if audio.size == 0:
         return ""
 
-    max_samples = int(sample_rate * 30.0)
+    max_samples = int(sample_rate * MAX_AUDIO_DURATION)
+    original_samples = audio.shape[0]
     if audio.shape[0] > max_samples:
+        print(f"[voice_input] Warning: audio truncated: {original_samples} samples ({original_samples/sample_rate:.2f}s) -> {max_samples} samples ({MAX_AUDIO_DURATION:.1f}s)", flush=True)
         audio = audio[:max_samples]
+    else:
+        print(f"[voice_input] Audio accepted: {original_samples} samples ({original_samples/sample_rate:.2f}s)", flush=True)
 
     audio, sample_rate = _ensure_16k(audio, sample_rate)
 
@@ -137,9 +166,21 @@ def transcribe_wav_bytes(data: bytes, engine: str = "reazonspeech-k2") -> tuple[
     """Transcribe a WAV byte stream. Returns (text, seconds)."""
     import soundfile as sf
 
+    # Validate WAV data integrity
+    if len(data) < 44:  # Minimum WAV header size
+        print(f"[voice_input] ❌ WAV data too small ({len(data)} bytes, need ≥44)", flush=True)
+        return "", 0.0
+    
     audio, sr = sf.read(io.BytesIO(data), dtype="float32")
     audio = np.array(audio, dtype=np.float32)
+    
+    raw_duration = len(audio) / sr
+    print(f"[voice_input] Raw WAV: {len(audio):,} samples, {sr}Hz, {raw_duration:.2f}s", flush=True)
+    
     audio = _pad_audio_array(audio, sr)
+    padded_duration = len(audio) / sr
+    if padded_duration != raw_duration:
+        print(f"[voice_input] After padding: {len(audio):,} samples, {padded_duration:.2f}s", flush=True)
     
     t0 = time.perf_counter()
     if engine == "kotoba":
@@ -148,3 +189,33 @@ def transcribe_wav_bytes(data: bytes, engine: str = "reazonspeech-k2") -> tuple[
         text = transcribe_numpy_k2(audio, sample_rate=sr)
     
     return text, time.perf_counter() - t0
+
+
+
+
+def transcribe_wav_bytes_hotwords(
+    data: bytes,
+    hotwords: list[str],
+    engine: str = "kotoba",
+) -> tuple[str, float]:
+    """
+    Transcribe WAV bytes with optional hotword biasing (Kotoba only).
+    Returns (text, seconds).
+    """
+    import soundfile as sf
+
+    audio, sr = sf.read(io.BytesIO(data), dtype="float32")
+    audio = np.array(audio, dtype=np.float32)
+    audio = _pad_audio_array(audio, sr)
+
+    t0 = time.perf_counter()
+    if engine == "kotoba":
+        text = transcribe_numpy_kotoba(audio, sample_rate=sr, hotwords=hotwords or None)
+    else:
+        # k2 doesn't expose hotword biasing here; fall back to normal
+        text = transcribe_numpy_k2(audio, sample_rate=sr)
+    return text, time.perf_counter() - t0
+
+
+
+
